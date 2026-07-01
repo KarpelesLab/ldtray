@@ -1,5 +1,10 @@
 # ldtray
 
+[![CI](https://github.com/KarpelesLab/ldtray/actions/workflows/ci.yml/badge.svg)](https://github.com/KarpelesLab/ldtray/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ldtray.svg)](https://crates.io/crates/ldtray)
+[![docs.rs](https://img.shields.io/docsrs/ldtray)](https://docs.rs/ldtray)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Cross-platform tray icons for Rust that are **never linked against any GUI or
 platform library at compile time**.
 
