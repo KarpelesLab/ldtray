@@ -106,6 +106,8 @@ pub type DBusObjectPathMessageFunction =
     unsafe extern "C" fn(*mut DBusConnection, *mut DBusMessage, *mut c_void) -> c_int;
 /// Callback invoked when an object path registration is torn down.
 pub type DBusObjectPathUnregisterFunction = unsafe extern "C" fn(*mut DBusConnection, *mut c_void);
+/// Frees user data attached to a filter/handler; we always pass `None`.
+pub type DBusFreeFunction = unsafe extern "C" fn(*mut c_void);
 
 /// Mirror of C `DBusObjectPathVTable` (two real slots + four reserved).
 #[repr(C)]
@@ -239,6 +241,14 @@ dbus_bindings! {
         *mut DBusConnection, *const c_char, *const DBusObjectPathVTable, *mut c_void, *mut DBusError,
     ) -> DBusBool;
     fn dbus_connection_unregister_object_path(*mut DBusConnection, *const c_char) -> DBusBool;
+
+    // Message filters (used to notice a StatusNotifierWatcher appearing later)
+    fn dbus_connection_add_filter(
+        *mut DBusConnection, DBusObjectPathMessageFunction, *mut c_void, Option<DBusFreeFunction>,
+    ) -> DBusBool;
+    fn dbus_connection_remove_filter(
+        *mut DBusConnection, DBusObjectPathMessageFunction, *mut c_void,
+    );
 
     // Bus / name management
     fn dbus_bus_get_unique_name(*mut DBusConnection) -> *const c_char;
