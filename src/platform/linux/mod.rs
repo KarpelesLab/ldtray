@@ -4,6 +4,8 @@
 //! over D-Bus, with `libdbus-1.so.3` loaded at runtime. Filled in over
 //! milestones M2–M5; until then this returns [`crate::Error::Unsupported`].
 
+mod dbus;
+
 use super::{Backend, Init};
 use crate::error::Result;
 
