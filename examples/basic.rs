@@ -19,6 +19,7 @@ fn main() {
         rgba.extend_from_slice(&[220, 40, 40, 255]);
     }
     let icon = Icon::from_rgba(side, side, rgba).expect("valid icon");
+    let notify_icon = icon.clone();
 
     let menu = Menu::new()
         .item(MenuItem::button(SAY_HI, "Say hi"))
@@ -44,7 +45,10 @@ fn main() {
         println!("event: {event:?}");
         match event {
             Event::Menu(id) if id.0 == SAY_HI => {
-                let _ = handle.notify(Notification::new("ldtray", "Hello from the tray!"));
+                let _ = handle.notify(
+                    Notification::new("ldtray", "Hello from the tray!")
+                        .with_icon(notify_icon.clone()),
+                );
             }
             Event::Menu(id) if id.0 == QUIT => {
                 let _ = handle.quit();

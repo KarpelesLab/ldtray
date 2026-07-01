@@ -22,11 +22,11 @@ a crash. Ignore the error and your program keeps running without a tray.
 
 ## Status
 
-| Platform | Mechanism                                | State        |
-| -------- | ---------------------------------------- | ------------ |
-| Linux    | StatusNotifierItem + dbusmenu over D-Bus | in progress  |
-| Windows  | `Shell_NotifyIcon` + hidden window       | planned      |
-| macOS    | `NSStatusItem` via the Obj-C runtime     | planned      |
+| Platform | Mechanism                                | State                     |
+| -------- | ---------------------------------------- | ------------------------- |
+| Linux    | StatusNotifierItem + dbusmenu over D-Bus | ✅ icon, triggers, menu, notifications |
+| Windows  | `Shell_NotifyIcon` + hidden window       | planned                   |
+| macOS    | `NSStatusItem` via the Obj-C runtime     | planned                   |
 
 ## Usage
 

@@ -9,6 +9,7 @@
 mod dbus;
 mod menu;
 mod msg;
+mod notify;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_int, c_void};
@@ -679,9 +680,15 @@ impl Backend for LinuxBackend {
         Ok(())
     }
 
-    fn notify(&mut self, _notification: &Notification) -> Result<()> {
-        // Implemented in M5 (org.freedesktop.Notifications).
-        Ok(())
+    fn notify(&mut self, notification: &Notification) -> Result<()> {
+        unsafe {
+            notify::send(
+                &self.state.dbus,
+                self.state.conn,
+                &self.state.id,
+                notification,
+            )
+        }
     }
 
     fn pump(&mut self, timeout: Duration, sink: &mut dyn FnMut(Event)) -> Result<()> {
