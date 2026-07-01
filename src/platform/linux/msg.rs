@@ -255,6 +255,18 @@ pub(super) unsafe fn read_i32(d: &DBus, it: *mut DBusMessageIter) -> Option<i32>
     }
 }
 
+/// Reads the current argument as a `u32`, if it is one.
+pub(super) unsafe fn read_u32(d: &DBus, it: *mut DBusMessageIter) -> Option<u32> {
+    unsafe {
+        if arg_type(d, it) != DBUS_TYPE_UINT32 {
+            return None;
+        }
+        let mut v: u32 = 0;
+        (d.dbus_message_iter_get_basic)(it, &mut v as *mut u32 as *mut c_void);
+        Some(v)
+    }
+}
+
 /// Reads the current argument as a `String` (`s` or `o`), if it is one.
 pub(super) unsafe fn read_string(d: &DBus, it: *mut DBusMessageIter) -> Option<String> {
     unsafe {

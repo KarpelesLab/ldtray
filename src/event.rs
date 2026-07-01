@@ -1,4 +1,5 @@
 use crate::menu::MenuId;
+use crate::notification::ActionId;
 
 /// Something the user did to the tray icon, delivered to the callback passed to
 /// [`crate::Tray::run`] or [`crate::Tray::spawn`].
@@ -19,4 +20,7 @@ pub enum Event {
     DoubleClick,
     /// A menu entry with this id was activated.
     Menu(MenuId),
+    /// A notification action button with this id was clicked (Linux only for
+    /// now; see [`crate::Notification::action`]).
+    NotificationAction(ActionId),
 }

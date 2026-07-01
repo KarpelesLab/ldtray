@@ -45,10 +45,16 @@ fn main() {
         println!("event: {event:?}");
         match event {
             Event::Menu(id) if id.0 == SAY_HI => {
+                // Actions are shown on Linux; ignored (message still shown)
+                // elsewhere.
                 let _ = handle.notify(
                     Notification::new("ldtray", "Hello from the tray!")
-                        .with_icon(notify_icon.clone()),
+                        .with_icon(notify_icon.clone())
+                        .action(100, "Wave back"),
                 );
+            }
+            Event::NotificationAction(action) => {
+                println!("notification action clicked: {}", action.0);
             }
             Event::Menu(id) if id.0 == QUIT => {
                 let _ = handle.quit();

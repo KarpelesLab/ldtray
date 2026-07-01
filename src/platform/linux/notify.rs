@@ -1,9 +1,12 @@
 //! Desktop notifications via `org.freedesktop.Notifications.Notify`.
 //!
-//! A single fire-and-forget method call to the session notification daemon. An
-//! attached icon is passed inline through the `image-data` hint (raw RGBA, which
-//! is exactly our [`Icon`](crate::Icon) format — no conversion needed, unlike
-//! the SNI pixmap).
+//! A method call to the session notification daemon. An attached icon is passed
+//! inline through the `image-data` hint (raw RGBA, which is exactly our
+//! [`Icon`](crate::Icon) format — no conversion needed, unlike the SNI pixmap).
+//! Action buttons are sent in the `actions` array with the [`ActionId`] as the
+//! key, so the daemon's `ActionInvoked` signal maps straight back.
+//!
+//! [`ActionId`]: crate::ActionId
 
 use std::ffi::CStr;
 use std::os::raw::{c_int, c_void};
@@ -16,14 +19,16 @@ use crate::notification::Notification;
 const NOTIFY_NAME: &CStr = c"org.freedesktop.Notifications";
 const NOTIFY_PATH: &CStr = c"/org/freedesktop/Notifications";
 
-/// Sends `notification` to the notification daemon. Best effort: if no daemon is
-/// present the call is simply dropped by the bus.
+/// Sends `notification` to the notification daemon and returns the id the daemon
+/// assigned it (0 if there is no daemon or it sent no reply). The id lets the
+/// caller route `ActionInvoked` signals back to this notification. Best effort:
+/// if no daemon is present the call is simply dropped by the bus.
 pub(super) unsafe fn send(
     d: &DBus,
     conn: *mut DBusConnection,
     app_name: &CStr,
     notification: &Notification,
-) -> Result<()> {
+) -> Result<u32> {
     let summary = cstring(&notification.title);
     let body = cstring(&notification.body);
 
@@ -46,9 +51,16 @@ pub(super) unsafe fn send(
         msg::append_str(d, &mut it, &summary); // summary
         msg::append_str(d, &mut it, &body); // body
 
-        // actions: empty `as`
+        // actions: `as` of alternating (key, label). The key is the ActionId as
+        // a decimal string, so ActionInvoked maps straight back to it.
         let mut actions = DBusMessageIter::uninit();
         (d.dbus_message_iter_open_container)(&mut it, DBUS_TYPE_ARRAY, c"s".as_ptr(), &mut actions);
+        for (id, label) in &notification.actions {
+            let key = cstring(&id.0.to_string());
+            let label = cstring(label);
+            msg::append_str(d, &mut actions, &key);
+            msg::append_str(d, &mut actions, &label);
+        }
         (d.dbus_message_iter_close_container)(&mut it, &mut actions);
 
         // hints: `a{sv}`, optionally carrying the inline image.
@@ -72,11 +84,32 @@ pub(super) unsafe fn send(
 
         msg::append_i32(d, &mut it, -1); // expire_timeout (-1 = default)
 
-        (d.dbus_connection_send)(conn, msg, std::ptr::null_mut());
-        (d.dbus_message_unref)(msg);
-        (d.dbus_connection_flush)(conn);
+        // With actions we need the returned id to route callbacks, so we make a
+        // blocking call; plain notifications stay fire-and-forget (cheaper).
+        if notification.actions.is_empty() {
+            (d.dbus_connection_send)(conn, msg, std::ptr::null_mut());
+            (d.dbus_message_unref)(msg);
+            (d.dbus_connection_flush)(conn);
+            Ok(0)
+        } else {
+            let mut err = DBusError::zeroed();
+            (d.dbus_error_init)(&mut err);
+            let reply = (d.dbus_connection_send_with_reply_and_block)(conn, msg, 2000, &mut err);
+            (d.dbus_message_unref)(msg);
+            let mut id = 0u32;
+            if !reply.is_null() {
+                let mut rit = DBusMessageIter::uninit();
+                if (d.dbus_message_iter_init)(reply, &mut rit) == TRUE {
+                    if let Some(v) = msg::read_u32(d, &mut rit) {
+                        id = v;
+                    }
+                }
+                (d.dbus_message_unref)(reply);
+            }
+            (d.dbus_error_free)(&mut err);
+            Ok(id)
+        }
     }
-    Ok(())
 }
 
 /// Appends the `image-data` hint: `{ "image-data": (iiibiiay) }`, where the

@@ -11,6 +11,7 @@ mod menu;
 mod msg;
 mod notify;
 
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_int, c_void};
 use std::time::Duration;
@@ -22,7 +23,7 @@ use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::icon::Icon;
 use crate::menu::{Menu, MenuId};
-use crate::notification::Notification;
+use crate::notification::{ActionId, Notification};
 
 const ITEM_PATH: &CStr = c"/StatusNotifierItem";
 const ITEM_IFACE: &CStr = c"org.kde.StatusNotifierItem";
@@ -32,6 +33,7 @@ const WATCHER_NAME: &CStr = c"org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &CStr = c"/StatusNotifierWatcher";
 const MENU_PATH: &CStr = c"/MenuBar";
 const MENU_IFACE: &CStr = c"com.canonical.dbusmenu";
+const NOTIFICATIONS_IFACE: &CStr = c"org.freedesktop.Notifications";
 
 /// Minimal, valid introspection data — enough for hosts and `d-feet`/`busctl`.
 const INTROSPECT_XML: &CStr = c"<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n<node>\n <interface name=\"org.kde.StatusNotifierItem\">\n  <method name=\"Activate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"SecondaryActivate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"ContextMenu\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"Scroll\"><arg name=\"delta\" type=\"i\" direction=\"in\"/><arg name=\"orientation\" type=\"s\" direction=\"in\"/></method>\n  <signal name=\"NewIcon\"/>\n  <signal name=\"NewToolTip\"/>\n  <signal name=\"NewTitle\"/>\n  <signal name=\"NewStatus\"><arg name=\"status\" type=\"s\"/></signal>\n  <property name=\"Category\" type=\"s\" access=\"read\"/>\n  <property name=\"Id\" type=\"s\" access=\"read\"/>\n  <property name=\"Title\" type=\"s\" access=\"read\"/>\n  <property name=\"Status\" type=\"s\" access=\"read\"/>\n  <property name=\"IconName\" type=\"s\" access=\"read\"/>\n  <property name=\"IconPixmap\" type=\"a(iiay)\" access=\"read\"/>\n  <property name=\"ToolTip\" type=\"(sa(iiay)ss)\" access=\"read\"/>\n  <property name=\"ItemIsMenu\" type=\"b\" access=\"read\"/>\n  <property name=\"Menu\" type=\"o\" access=\"read\"/>\n </interface>\n</node>\n";
@@ -61,6 +63,9 @@ struct State {
     icon_argb: Vec<u8>,
     /// The context menu, rendered as a dbusmenu node tree at `menu_path`.
     menu_model: menu::DbusMenu,
+    /// Ids of our outstanding notifications that carry actions, so `ActionInvoked`
+    /// signals from other apps' notifications are ignored.
+    notify_ids: HashSet<u32>,
     /// Interactions collected during dispatch, drained by `pump`.
     pending: Vec<Event>,
 }
@@ -139,6 +144,7 @@ impl LinuxBackend {
             icon_h,
             icon_argb,
             menu_model,
+            notify_ids: HashSet::new(),
             pending: Vec::new(),
         });
 
@@ -177,12 +183,19 @@ impl LinuxBackend {
             )));
         }
 
-        // Notice a watcher that starts *after* us (daemon booted before the panel).
-        let match_rule = c"type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.kde.StatusNotifierWatcher'";
+        // Notice a watcher that starts *after* us (daemon booted before the
+        // panel), and receive notification action callbacks.
+        let watcher_rule = c"type='signal',sender='org.freedesktop.DBus',interface='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.kde.StatusNotifierWatcher'";
+        let action_rule =
+            c"type='signal',interface='org.freedesktop.Notifications',member='ActionInvoked'";
+        let closed_rule =
+            c"type='signal',interface='org.freedesktop.Notifications',member='NotificationClosed'";
         unsafe {
-            (state.dbus.dbus_bus_add_match)(conn, match_rule.as_ptr(), &mut err);
-            (state.dbus.dbus_error_free)(&mut err);
-            (state.dbus.dbus_connection_add_filter)(conn, watcher_filter, state_ptr, None);
+            for rule in [watcher_rule, action_rule, closed_rule] {
+                (state.dbus.dbus_bus_add_match)(conn, rule.as_ptr(), &mut err);
+                (state.dbus.dbus_error_free)(&mut err);
+            }
+            (state.dbus.dbus_connection_add_filter)(conn, signal_filter, state_ptr, None);
         }
 
         // Best-effort registration with whatever host is already present.
@@ -647,7 +660,7 @@ impl Drop for State {
         unsafe {
             (self.dbus.dbus_connection_unregister_object_path)(self.conn, ITEM_PATH.as_ptr());
             (self.dbus.dbus_connection_unregister_object_path)(self.conn, MENU_PATH.as_ptr());
-            (self.dbus.dbus_connection_remove_filter)(self.conn, watcher_filter, state_ptr);
+            (self.dbus.dbus_connection_remove_filter)(self.conn, signal_filter, state_ptr);
             (self.dbus.dbus_connection_close)(self.conn);
             (self.dbus.dbus_connection_unref)(self.conn);
         }
@@ -681,14 +694,20 @@ impl Backend for LinuxBackend {
     }
 
     fn notify(&mut self, notification: &Notification) -> Result<()> {
-        unsafe {
+        let id = unsafe {
             notify::send(
                 &self.state.dbus,
                 self.state.conn,
                 &self.state.id,
                 notification,
-            )
+            )?
+        };
+        // Remember notifications that carry actions so we can route their
+        // ActionInvoked callbacks (and ignore other apps' notifications).
+        if !notification.actions.is_empty() && id != 0 {
+            self.state.notify_ids.insert(id);
         }
+        Ok(())
     }
 
     fn pump(&mut self, timeout: Duration, sink: &mut dyn FnMut(Event)) -> Result<()> {
@@ -746,24 +765,67 @@ fn object_vtable(handler: DBusObjectPathMessageFunction) -> DBusObjectPathVTable
     }
 }
 
-/// libdbus connection filter: re-register when the watcher (re)appears.
-unsafe extern "C" fn watcher_filter(
+/// libdbus connection filter: re-register when the watcher (re)appears, and
+/// route notification `ActionInvoked` / `NotificationClosed` signals.
+unsafe extern "C" fn signal_filter(
     _conn: *mut DBusConnection,
     msg: *mut DBusMessage,
     user_data: *mut c_void,
 ) -> c_int {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let state = unsafe { &mut *(user_data as *mut State) };
-        let is_signal =
-            unsafe { (state.dbus.dbus_message_get_type)(msg) } == DBUS_MESSAGE_TYPE_SIGNAL;
+        if unsafe { (state.dbus.dbus_message_get_type)(msg) } != DBUS_MESSAGE_TYPE_SIGNAL {
+            return;
+        }
+        let iface = unsafe { ptr_to_cstr((state.dbus.dbus_message_get_interface)(msg)) };
         let member = unsafe { ptr_to_cstr((state.dbus.dbus_message_get_member)(msg)) };
-        if is_signal && member == Some(c"NameOwnerChanged") {
+
+        if member == Some(c"NameOwnerChanged") {
             let args = unsafe { msg::read_leading_strings(&state.dbus, msg, 3) };
             // args = [name, old_owner, new_owner]; a non-empty new owner means
             // the watcher just came up.
             if args.len() == 3 && args[0] == "org.kde.StatusNotifierWatcher" && !args[2].is_empty()
             {
                 unsafe { state.register_with_watcher() };
+            }
+            return;
+        }
+
+        if iface != Some(NOTIFICATIONS_IFACE) {
+            return;
+        }
+        if member == Some(c"ActionInvoked") {
+            // (id: u32, action_key: s) — we set action_key to the ActionId.
+            let (id, key) = unsafe {
+                let mut it = msg::iter_init(&state.dbus, msg);
+                let id = msg::read_u32(&state.dbus, &mut it);
+                let key = if id.is_some() && msg::advance(&state.dbus, &mut it) {
+                    msg::read_string(&state.dbus, &mut it)
+                } else {
+                    None
+                };
+                (id, key)
+            };
+            // Only react to our own notifications' actions. The id is pruned on
+            // NotificationClosed (which the daemon emits after an action), so a
+            // stray non-numeric key does not drop tracking prematurely.
+            if let (Some(id), Some(key)) = (id, key) {
+                if state.notify_ids.contains(&id) {
+                    if let Ok(action) = key.parse::<u32>() {
+                        state
+                            .pending
+                            .push(Event::NotificationAction(ActionId(action)));
+                    }
+                }
+            }
+        } else if member == Some(c"NotificationClosed") {
+            // (id: u32, reason: u32) — stop tracking a dismissed notification.
+            let id = unsafe {
+                let mut it = msg::iter_init(&state.dbus, msg);
+                msg::read_u32(&state.dbus, &mut it)
+            };
+            if let Some(id) = id {
+                state.notify_ids.remove(&id);
             }
         }
     }));

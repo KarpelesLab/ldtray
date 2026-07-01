@@ -20,7 +20,7 @@ a crash. Ignore the error and your program keeps running without a tray.
 - Tray icon from raw RGBA pixels
 - Click triggers: left / right / middle / double click
 - Context menu with buttons, checkboxes, separators, and submenus
-- Desktop notifications
+- Desktop notifications (with clickable action buttons on Linux)
 - Update icon, tooltip, and menu live from any thread via a `Send + Sync` handle
 - Blocking `run()` (main-thread-correct, works on macOS) **or** background
   `spawn()` (Linux/Windows)

@@ -56,5 +56,5 @@ pub use error::{Error, Result};
 pub use event::Event;
 pub use icon::Icon;
 pub use menu::{Menu, MenuId, MenuItem};
-pub use notification::Notification;
+pub use notification::{ActionId, Notification};
 pub use tray::{Tray, TrayConfig, TrayHandle};
