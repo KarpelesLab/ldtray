@@ -27,11 +27,17 @@ a crash. Ignore the error and your program keeps running without a tray.
 
 ## Status
 
-| Platform | Mechanism                                | State                     |
-| -------- | ---------------------------------------- | ------------------------- |
-| Linux    | StatusNotifierItem + dbusmenu over D-Bus | ✅ icon, triggers, menu, notifications |
-| Windows  | `Shell_NotifyIcon` + hidden window       | planned                   |
-| macOS    | `NSStatusItem` via the Obj-C runtime     | planned                   |
+All three backends implement the full feature set — tray icon, left/right/middle/
+double-click triggers, context menu, and notifications:
+
+| Platform | Mechanism                                | Validation                          |
+| -------- | ---------------------------------------- | ----------------------------------- |
+| Linux    | StatusNotifierItem + dbusmenu over D-Bus | runtime-tested end-to-end (KDE)     |
+| Windows  | `Shell_NotifyIcon` + hidden window       | builds + clippy on CI (windows)     |
+| macOS    | `NSStatusItem` via the Obj-C runtime     | builds + clippy on CI (macos)       |
+
+The Windows and macOS backends are compile- and lint-validated on their own CI
+runners; interactive behaviour there needs a real desktop session.
 
 ## Usage
 
