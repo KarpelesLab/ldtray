@@ -1,0 +1,18 @@
+[package]
+name = "ldtray"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+description = "Cross-platform tray icons with zero compile-time linkage to platform GUI libraries — every toolkit is loaded at runtime via libloading, so headless daemons degrade gracefully instead of failing to link."
+repository = "https://github.com/KarpelesLab/ldtray"
+readme = "README.md"
+categories = ["gui", "os"]
+keywords = ["tray", "systray", "notification", "libloading", "cross-platform"]
+
+[dependencies]
+libloading = "0.8"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
