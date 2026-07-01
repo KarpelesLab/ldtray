@@ -35,6 +35,8 @@ jobs:
         run: cargo test
       - name: Build examples
         run: cargo build --examples
+      - name: Smoke run (drives a real tray on the GUI runners)
+        run: cargo run --example smoke
 
   fmt:
     name: rustfmt
