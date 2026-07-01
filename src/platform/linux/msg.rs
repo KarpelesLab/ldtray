@@ -23,6 +23,8 @@ pub(super) enum Variant<'a> {
     Bool(bool),
     /// `i`
     Int32(i32),
+    /// `u`
+    UInt32(u32),
     /// `a(iiay)` with a single entry — the icon pixmap in ARGB32 (network order).
     Pixmap {
         width: i32,
@@ -129,6 +131,7 @@ pub(super) unsafe fn append_variant(d: &DBus, it: *mut DBusMessageIter, value: &
         Variant::ObjectPath(_) => c"o",
         Variant::Bool(_) => c"b",
         Variant::Int32(_) => c"i",
+        Variant::UInt32(_) => c"u",
         Variant::Pixmap { .. } => c"a(iiay)",
         Variant::ToolTip { .. } => c"(sa(iiay)ss)",
     };
@@ -140,6 +143,7 @@ pub(super) unsafe fn append_variant(d: &DBus, it: *mut DBusMessageIter, value: &
             Variant::ObjectPath(s) => append_object_path(d, &mut var, s),
             Variant::Bool(b) => append_bool(d, &mut var, *b),
             Variant::Int32(n) => append_i32(d, &mut var, *n),
+            Variant::UInt32(n) => append_u32(d, &mut var, *n),
             Variant::Pixmap {
                 width,
                 height,
@@ -211,6 +215,75 @@ pub(super) unsafe fn read_leading_strings(
             }
             out.push(CStr::from_ptr(p).to_string_lossy().into_owned());
             if (d.dbus_message_iter_next)(&mut it) == FALSE {
+                break;
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Positional argument reading (for dbusmenu method calls)
+// ---------------------------------------------------------------------------
+
+/// Initialises an argument iterator over `msg`'s body.
+pub(super) unsafe fn iter_init(d: &DBus, msg: *mut DBusMessage) -> DBusMessageIter {
+    let mut it = DBusMessageIter::uninit();
+    unsafe { (d.dbus_message_iter_init)(msg, &mut it) };
+    it
+}
+
+/// The type code of the argument the iterator currently points at.
+pub(super) unsafe fn arg_type(d: &DBus, it: *mut DBusMessageIter) -> std::os::raw::c_int {
+    unsafe { (d.dbus_message_iter_get_arg_type)(it) }
+}
+
+/// Advances to the next argument; returns false at the end.
+pub(super) unsafe fn advance(d: &DBus, it: *mut DBusMessageIter) -> bool {
+    unsafe { (d.dbus_message_iter_next)(it) != FALSE }
+}
+
+/// Reads the current argument as an `i32`, if it is one.
+pub(super) unsafe fn read_i32(d: &DBus, it: *mut DBusMessageIter) -> Option<i32> {
+    unsafe {
+        if arg_type(d, it) != DBUS_TYPE_INT32 {
+            return None;
+        }
+        let mut v: i32 = 0;
+        (d.dbus_message_iter_get_basic)(it, &mut v as *mut i32 as *mut c_void);
+        Some(v)
+    }
+}
+
+/// Reads the current argument as a `String` (`s` or `o`), if it is one.
+pub(super) unsafe fn read_string(d: &DBus, it: *mut DBusMessageIter) -> Option<String> {
+    unsafe {
+        let ty = arg_type(d, it);
+        if ty != DBUS_TYPE_STRING && ty != DBUS_TYPE_OBJECT_PATH {
+            return None;
+        }
+        let mut p: *const c_char = std::ptr::null();
+        (d.dbus_message_iter_get_basic)(it, &mut p as *mut *const c_char as *mut c_void);
+        if p.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(p).to_string_lossy().into_owned())
+        }
+    }
+}
+
+/// Reads the current argument as an array of `i32` (`ai`).
+pub(super) unsafe fn read_i32_array(d: &DBus, it: *mut DBusMessageIter) -> Vec<i32> {
+    let mut out = Vec::new();
+    unsafe {
+        if arg_type(d, it) != DBUS_TYPE_ARRAY {
+            return out;
+        }
+        let mut sub = DBusMessageIter::uninit();
+        (d.dbus_message_iter_recurse)(it, &mut sub);
+        while let Some(v) = read_i32(d, &mut sub) {
+            out.push(v);
+            if !advance(d, &mut sub) {
                 break;
             }
         }

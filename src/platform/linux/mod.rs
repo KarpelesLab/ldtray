@@ -7,6 +7,7 @@
 //! runtime by [`dbus::DBus::load`] — nothing here is linked.
 
 mod dbus;
+mod menu;
 mod msg;
 
 use std::ffi::{CStr, CString};
@@ -19,7 +20,7 @@ use super::{Backend, Init};
 use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::icon::Icon;
-use crate::menu::Menu;
+use crate::menu::{Menu, MenuId};
 use crate::notification::Notification;
 
 const ITEM_PATH: &CStr = c"/StatusNotifierItem";
@@ -28,6 +29,8 @@ const PROPERTIES_IFACE: &CStr = c"org.freedesktop.DBus.Properties";
 const INTROSPECTABLE_IFACE: &CStr = c"org.freedesktop.DBus.Introspectable";
 const WATCHER_NAME: &CStr = c"org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &CStr = c"/StatusNotifierWatcher";
+const MENU_PATH: &CStr = c"/MenuBar";
+const MENU_IFACE: &CStr = c"com.canonical.dbusmenu";
 
 /// Minimal, valid introspection data — enough for hosts and `d-feet`/`busctl`.
 const INTROSPECT_XML: &CStr = c"<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n<node>\n <interface name=\"org.kde.StatusNotifierItem\">\n  <method name=\"Activate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"SecondaryActivate\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"ContextMenu\"><arg name=\"x\" type=\"i\" direction=\"in\"/><arg name=\"y\" type=\"i\" direction=\"in\"/></method>\n  <method name=\"Scroll\"><arg name=\"delta\" type=\"i\" direction=\"in\"/><arg name=\"orientation\" type=\"s\" direction=\"in\"/></method>\n  <signal name=\"NewIcon\"/>\n  <signal name=\"NewToolTip\"/>\n  <signal name=\"NewTitle\"/>\n  <signal name=\"NewStatus\"><arg name=\"status\" type=\"s\"/></signal>\n  <property name=\"Category\" type=\"s\" access=\"read\"/>\n  <property name=\"Id\" type=\"s\" access=\"read\"/>\n  <property name=\"Title\" type=\"s\" access=\"read\"/>\n  <property name=\"Status\" type=\"s\" access=\"read\"/>\n  <property name=\"IconName\" type=\"s\" access=\"read\"/>\n  <property name=\"IconPixmap\" type=\"a(iiay)\" access=\"read\"/>\n  <property name=\"ToolTip\" type=\"(sa(iiay)ss)\" access=\"read\"/>\n  <property name=\"ItemIsMenu\" type=\"b\" access=\"read\"/>\n  <property name=\"Menu\" type=\"o\" access=\"read\"/>\n </interface>\n</node>\n";
@@ -55,8 +58,8 @@ struct State {
     icon_w: i32,
     icon_h: i32,
     icon_argb: Vec<u8>,
-    /// Retained for the dbusmenu milestone (M4); the SNI advertises `menu_path`.
-    menu: Option<Menu>,
+    /// The context menu, rendered as a dbusmenu node tree at `menu_path`.
+    menu_model: menu::DbusMenu,
     /// Interactions collected during dispatch, drained by `pump`.
     pending: Vec<Event>,
 }
@@ -120,6 +123,7 @@ impl LinuxBackend {
             init.tooltip.clone()
         };
         let (icon_w, icon_h, icon_argb) = rgba_to_argb(&init.icon);
+        let menu_model = menu::DbusMenu::build(init.menu.as_ref(), 1);
 
         let mut state = Box::new(State {
             dbus,
@@ -133,36 +137,42 @@ impl LinuxBackend {
             icon_w,
             icon_h,
             icon_argb,
-            menu: init.menu,
+            menu_model,
             pending: Vec::new(),
         });
 
         let state_ptr = (&mut *state as *mut State) as *mut c_void;
 
-        // Register the item object. libdbus copies the vtable, so a local is fine.
-        let vtable = DBusObjectPathVTable {
-            unregister_function: None,
-            message_function: Some(item_message_handler),
-            pad1: None,
-            pad2: None,
-            pad3: None,
-            pad4: None,
-        };
+        // Register the item and the dbusmenu object. libdbus copies each vtable,
+        // so locals are fine.
+        let item_vtable = object_vtable(item_message_handler);
+        let menu_vtable = object_vtable(menu_message_handler);
         let registered = unsafe {
-            (state.dbus.dbus_connection_try_register_object_path)(
+            let item_ok = (state.dbus.dbus_connection_try_register_object_path)(
                 conn,
                 ITEM_PATH.as_ptr(),
-                &vtable,
+                &item_vtable,
                 state_ptr,
                 &mut err,
-            )
+            );
+            if item_ok == FALSE {
+                FALSE
+            } else {
+                (state.dbus.dbus_connection_try_register_object_path)(
+                    conn,
+                    MENU_PATH.as_ptr(),
+                    &menu_vtable,
+                    state_ptr,
+                    &mut err,
+                )
+            }
         };
         if registered == FALSE {
             let message = err.message();
             unsafe { (state.dbus.dbus_error_free)(&mut err) };
             // `state` drops here, closing the connection.
             return Err(Error::Backend(format!(
-                "failed to export StatusNotifierItem: {message}"
+                "failed to export tray objects: {message}"
             )));
         }
 
@@ -247,6 +257,214 @@ impl State {
         }
 
         DBUS_HANDLER_RESULT_NOT_YET_HANDLED
+    }
+
+    /// Dispatches a message delivered to `/MenuBar` (the dbusmenu object).
+    unsafe fn handle_menu_message(&mut self, msg: *mut DBusMessage) -> c_int {
+        let iface = unsafe { ptr_to_cstr((self.dbus.dbus_message_get_interface)(msg)) };
+        let member = unsafe { ptr_to_cstr((self.dbus.dbus_message_get_member)(msg)) };
+        let (Some(iface), Some(member)) = (iface, member) else {
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        };
+
+        if iface == PROPERTIES_IFACE {
+            if member == c"Get" {
+                return unsafe { self.reply_menu_get(msg) };
+            }
+            if member == c"GetAll" {
+                return unsafe { self.reply_menu_get_all(msg) };
+            }
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        }
+
+        if iface == MENU_IFACE {
+            if member == c"GetLayout" {
+                return unsafe { self.reply_get_layout(msg) };
+            }
+            if member == c"GetGroupProperties" {
+                return unsafe { self.reply_get_group_properties(msg) };
+            }
+            if member == c"Event" {
+                unsafe { self.handle_menu_event(msg) };
+                unsafe { self.send_empty_return(msg) };
+                return DBUS_HANDLER_RESULT_HANDLED;
+            }
+            if member == c"AboutToShow" {
+                return unsafe { self.reply_about_to_show(msg) };
+            }
+            // GetProperty/EventGroup/AboutToShowGroup are optional; let libdbus
+            // reply UnknownMethod for anything we do not implement.
+            return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
+        }
+
+        DBUS_HANDLER_RESULT_NOT_YET_HANDLED
+    }
+
+    unsafe fn reply_get_layout(&self, call: *mut DBusMessage) -> c_int {
+        let (parent, depth) = unsafe {
+            let mut it = msg::iter_init(&self.dbus, call);
+            let parent = msg::read_i32(&self.dbus, &mut it).unwrap_or(0);
+            msg::advance(&self.dbus, &mut it);
+            let depth = msg::read_i32(&self.dbus, &mut it).unwrap_or(-1);
+            (parent, depth)
+        };
+        unsafe {
+            let reply = (self.dbus.dbus_message_new_method_return)(call);
+            if reply.is_null() {
+                return DBUS_HANDLER_RESULT_NEED_MEMORY;
+            }
+            let mut it = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_init_append)(reply, &mut it);
+            self.menu_model
+                .append_get_layout(&self.dbus, &mut it, parent, depth);
+            self.send(reply);
+        }
+        DBUS_HANDLER_RESULT_HANDLED
+    }
+
+    unsafe fn reply_get_group_properties(&self, call: *mut DBusMessage) -> c_int {
+        let ids = unsafe {
+            let mut it = msg::iter_init(&self.dbus, call);
+            msg::read_i32_array(&self.dbus, &mut it)
+        };
+        unsafe {
+            let reply = (self.dbus.dbus_message_new_method_return)(call);
+            if reply.is_null() {
+                return DBUS_HANDLER_RESULT_NEED_MEMORY;
+            }
+            let mut it = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_init_append)(reply, &mut it);
+            self.menu_model
+                .append_group_properties(&self.dbus, &mut it, &ids);
+            self.send(reply);
+        }
+        DBUS_HANDLER_RESULT_HANDLED
+    }
+
+    /// Reads `Event(id, eventId, ...)` and, on `clicked`, queues a menu event.
+    unsafe fn handle_menu_event(&mut self, call: *mut DBusMessage) {
+        let (id, event_id) = unsafe {
+            let mut it = msg::iter_init(&self.dbus, call);
+            let id = msg::read_i32(&self.dbus, &mut it);
+            let event_id = if id.is_some() && msg::advance(&self.dbus, &mut it) {
+                msg::read_string(&self.dbus, &mut it)
+            } else {
+                None
+            };
+            (id, event_id)
+        };
+        if let (Some(id), Some(event_id)) = (id, event_id) {
+            if event_id == "clicked" {
+                if let Some(menu_id) = self.menu_model.menu_id_for(id) {
+                    self.pending.push(Event::Menu(MenuId(menu_id)));
+                }
+            }
+        }
+    }
+
+    /// `AboutToShow(id) -> needUpdate: b`; our layout is always current.
+    unsafe fn reply_about_to_show(&self, call: *mut DBusMessage) -> c_int {
+        unsafe {
+            let reply = (self.dbus.dbus_message_new_method_return)(call);
+            if reply.is_null() {
+                return DBUS_HANDLER_RESULT_NEED_MEMORY;
+            }
+            let mut it = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_init_append)(reply, &mut it);
+            msg::append_bool(&self.dbus, &mut it, false);
+            self.send(reply);
+        }
+        DBUS_HANDLER_RESULT_HANDLED
+    }
+
+    /// The dbusmenu object's own properties (`Version`/`Status`/`TextDirection`).
+    fn menu_property(&self, name: &str) -> Option<msg::Variant<'_>> {
+        use msg::Variant;
+        Some(match name {
+            "Version" => Variant::UInt32(3),
+            "Status" => Variant::Str(c"normal"),
+            "TextDirection" => Variant::Str(c"ltr"),
+            _ => return None,
+        })
+    }
+
+    unsafe fn reply_menu_get(&self, call: *mut DBusMessage) -> c_int {
+        let args = unsafe { msg::read_leading_strings(&self.dbus, call, 2) };
+        if args.len() < 2 {
+            return unsafe {
+                self.send_error(
+                    call,
+                    c"org.freedesktop.DBus.Error.InvalidArgs",
+                    c"expected interface and property",
+                )
+            };
+        }
+        match self.menu_property(&args[1]) {
+            Some(value) => unsafe {
+                let reply = (self.dbus.dbus_message_new_method_return)(call);
+                if reply.is_null() {
+                    return DBUS_HANDLER_RESULT_NEED_MEMORY;
+                }
+                let mut it = DBusMessageIter::uninit();
+                (self.dbus.dbus_message_iter_init_append)(reply, &mut it);
+                msg::append_variant(&self.dbus, &mut it, &value);
+                self.send(reply);
+                DBUS_HANDLER_RESULT_HANDLED
+            },
+            None => unsafe {
+                self.send_error(
+                    call,
+                    c"org.freedesktop.DBus.Error.UnknownProperty",
+                    c"no such property",
+                )
+            },
+        }
+    }
+
+    unsafe fn reply_menu_get_all(&self, call: *mut DBusMessage) -> c_int {
+        unsafe {
+            let reply = (self.dbus.dbus_message_new_method_return)(call);
+            if reply.is_null() {
+                return DBUS_HANDLER_RESULT_NEED_MEMORY;
+            }
+            let mut it = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_init_append)(reply, &mut it);
+            let mut arr = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_open_container)(
+                &mut it,
+                DBUS_TYPE_ARRAY,
+                c"{sv}".as_ptr(),
+                &mut arr,
+            );
+            for key in ["Version", "Status", "TextDirection"] {
+                if let Some(value) = self.menu_property(key) {
+                    let ckey = cstring(key);
+                    msg::append_dict_entry(&self.dbus, &mut arr, &ckey, &value);
+                }
+            }
+            (self.dbus.dbus_message_iter_close_container)(&mut it, &mut arr);
+            self.send(reply);
+        }
+        DBUS_HANDLER_RESULT_HANDLED
+    }
+
+    /// Emits `LayoutUpdated(revision, 0)` so the host re-fetches the menu.
+    unsafe fn emit_layout_updated(&self) {
+        unsafe {
+            let signal = (self.dbus.dbus_message_new_signal)(
+                MENU_PATH.as_ptr(),
+                MENU_IFACE.as_ptr(),
+                c"LayoutUpdated".as_ptr(),
+            );
+            if signal.is_null() {
+                return;
+            }
+            let mut it = DBusMessageIter::uninit();
+            (self.dbus.dbus_message_iter_init_append)(signal, &mut it);
+            msg::append_u32(&self.dbus, &mut it, self.menu_model.revision);
+            msg::append_i32(&self.dbus, &mut it, 0);
+            self.send(signal);
+        }
     }
 
     /// Returns the variant for a single StatusNotifierItem property.
@@ -427,6 +645,7 @@ impl Drop for State {
         let state_ptr = (self as *mut State) as *mut c_void;
         unsafe {
             (self.dbus.dbus_connection_unregister_object_path)(self.conn, ITEM_PATH.as_ptr());
+            (self.dbus.dbus_connection_unregister_object_path)(self.conn, MENU_PATH.as_ptr());
             (self.dbus.dbus_connection_remove_filter)(self.conn, watcher_filter, state_ptr);
             (self.dbus.dbus_connection_close)(self.conn);
             (self.dbus.dbus_connection_unref)(self.conn);
@@ -454,8 +673,9 @@ impl Backend for LinuxBackend {
     }
 
     fn set_menu(&mut self, menu: Option<&Menu>) -> Result<()> {
-        // The dbusmenu object is wired up in M4; for now retain the description.
-        self.state.menu = menu.cloned();
+        let revision = self.state.menu_model.revision.wrapping_add(1);
+        self.state.menu_model = menu::DbusMenu::build(menu, revision);
+        unsafe { self.state.emit_layout_updated() };
         Ok(())
     }
 
@@ -492,6 +712,31 @@ unsafe extern "C" fn item_message_handler(
         unsafe { state.handle_item_message(msg) }
     }));
     result.unwrap_or(DBUS_HANDLER_RESULT_NOT_YET_HANDLED)
+}
+
+/// libdbus object-path callback for `/MenuBar` (dbusmenu).
+unsafe extern "C" fn menu_message_handler(
+    _conn: *mut DBusConnection,
+    msg: *mut DBusMessage,
+    user_data: *mut c_void,
+) -> c_int {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state = unsafe { &mut *(user_data as *mut State) };
+        unsafe { state.handle_menu_message(msg) }
+    }));
+    result.unwrap_or(DBUS_HANDLER_RESULT_NOT_YET_HANDLED)
+}
+
+/// Builds an object-path vtable with just a message handler (libdbus copies it).
+fn object_vtable(handler: DBusObjectPathMessageFunction) -> DBusObjectPathVTable {
+    DBusObjectPathVTable {
+        unregister_function: None,
+        message_function: Some(handler),
+        pad1: None,
+        pad2: None,
+        pad3: None,
+        pad4: None,
+    }
 }
 
 /// libdbus connection filter: re-register when the watcher (re)appears.
