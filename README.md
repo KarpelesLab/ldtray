@@ -30,14 +30,18 @@ a crash. Ignore the error and your program keeps running without a tray.
 All three backends implement the full feature set — tray icon, left/right/middle/
 double-click triggers, context menu, and notifications:
 
-| Platform | Mechanism                                | Validation                          |
-| -------- | ---------------------------------------- | ----------------------------------- |
-| Linux    | StatusNotifierItem + dbusmenu over D-Bus | runtime-tested end-to-end (KDE)     |
-| Windows  | `Shell_NotifyIcon` + hidden window       | builds + clippy on CI (windows)     |
-| macOS    | `NSStatusItem` via the Obj-C runtime     | builds + clippy on CI (macos)       |
+| Platform | Mechanism                                | Validation                                    |
+| -------- | ---------------------------------------- | --------------------------------------------- |
+| Linux    | StatusNotifierItem + dbusmenu over D-Bus | end-to-end incl. clicks/menu/notify (KDE)     |
+| Windows  | `Shell_NotifyIcon` + hidden window       | build + clippy + runtime smoke on CI          |
+| macOS    | `NSStatusItem` via the Obj-C runtime     | build + clippy + runtime smoke on CI          |
 
-The Windows and macOS backends are compile- and lint-validated on their own CI
-runners; interactive behaviour there needs a real desktop session.
+Every backend is exercised at runtime by `examples/smoke.rs`, which CI runs on
+the Windows and macOS GUI runners (and Linux): it creates the tray, pumps the
+loop, updates icon/tooltip/menu, fires a notification and quits — so wrong FFI
+struct layouts or message signatures fail the build. Synthetic click delivery
+still needs a real interactive desktop; only the Linux triggers/menu are
+verified against a live host end-to-end.
 
 ## Usage
 
