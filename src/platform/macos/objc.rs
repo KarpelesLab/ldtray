@@ -130,9 +130,23 @@ impl ObjC {
         }
     }
 
+    /// Reads an `NSString` (via `-UTF8String`) into a Rust `String`. Returns
+    /// `None` for a nil string. Messaging a nil `NSString` is a safe no-op.
+    pub unsafe fn nsstring_to_rust(&self, s: id) -> Option<String> {
+        unsafe {
+            let ptr = self.send0(s, self.sel(c"UTF8String")) as *const c_char;
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            }
+        }
+    }
+
     // Typed objc_msgSend wrappers. Naming: send_<args>[_ret<type>].
     msg!(send0() -> id);
     msg!(send_id(a: id) -> id);
+    msg!(send_id_id(a: id, b: id) -> id);
     msg!(send_void_id(a: id));
     msg!(send_void_sel(a: SEL));
     msg!(send_void_i64(a: i64));

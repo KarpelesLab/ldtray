@@ -22,7 +22,7 @@ use crate::error::Result;
 use crate::event::Event;
 use crate::icon::Icon;
 use crate::menu::{Menu, MenuId, MenuItem};
-use crate::notification::Notification;
+use crate::notification::{ActionId, Notification};
 
 /// `NSApplicationActivationPolicyAccessory` — menu-bar UI, no Dock icon.
 const ACTIVATION_ACCESSORY: i64 = 1;
@@ -36,6 +36,9 @@ const EVENT_RIGHT_UP: u64 = 4;
 const EVENT_OTHER_UP: u64 = 26;
 /// `sendActionOn:` mask covering left/right/other mouse-up.
 const ACTION_MASK: u64 = (1 << 2) | (1 << 4) | (1 << 26);
+// NSUserNotificationActivationType values.
+const ACTIVATION_ACTION_BUTTON: i64 = 2;
+const ACTIVATION_ADDITIONAL_ACTION: i64 = 4;
 
 static OBJC: OnceLock<ObjC> = OnceLock::new();
 static DELEGATE_CLASS: OnceLock<usize> = OnceLock::new();
@@ -272,11 +275,47 @@ impl State {
                 objc.sel(c"setInformativeText:"),
                 objc.nsstring(&notification.body),
             );
+
+            // Actions: the first becomes the primary action button (its id is
+            // stashed in the notification's identifier); the rest become
+            // additionalActions, each carrying its ActionId as the identifier.
+            let mut actions = notification.actions.iter();
+            if let Some((first_id, first_label)) = actions.next() {
+                objc.send_void_id(
+                    note,
+                    objc.sel(c"setIdentifier:"),
+                    objc.nsstring(&first_id.0.to_string()),
+                );
+                objc.send_void_i8(note, objc.sel(c"setHasActionButton:"), 1);
+                objc.send_void_id(
+                    note,
+                    objc.sel(c"setActionButtonTitle:"),
+                    objc.nsstring(first_label),
+                );
+
+                let action_cls = objc.class(c"NSUserNotificationAction");
+                if !action_cls.is_null() {
+                    let array = objc.send0(objc.class(c"NSMutableArray"), objc.sel(c"array"));
+                    for (id, label) in actions {
+                        let action = objc.send_id_id(
+                            action_cls,
+                            objc.sel(c"actionWithIdentifier:title:"),
+                            objc.nsstring(&id.0.to_string()),
+                            objc.nsstring(label),
+                        );
+                        objc.send_void_id(array, objc.sel(c"addObject:"), action);
+                    }
+                    objc.send_void_id(note, objc.sel(c"setAdditionalActions:"), array);
+                }
+            }
+
             let center = objc.send0(
                 objc.class(c"NSUserNotificationCenter"),
                 objc.sel(c"defaultUserNotificationCenter"),
             );
             if !center.is_null() {
+                // Route action clicks back to us via our delegate.
+                objc.send_void_id(center, objc.sel(c"setDelegate:"), self.delegate);
                 objc.send_void_id(center, objc.sel(c"deliverNotification:"), note);
             }
         }
@@ -397,6 +436,7 @@ unsafe fn delegate_class(objc: &ObjC) -> Class {
         objc.add_ivar(cls, c"ldState", 8, 3, c"^v");
         let on_click: unsafe extern "C" fn(id, SEL, id) = delegate_on_click;
         let on_menu: unsafe extern "C" fn(id, SEL, id) = delegate_on_menu;
+        let on_notify: unsafe extern "C" fn(id, SEL, id, id) = delegate_on_notification;
         objc.add_method(
             cls,
             objc.sel(c"onClick:"),
@@ -408,6 +448,13 @@ unsafe fn delegate_class(objc: &ObjC) -> Class {
             objc.sel(c"onMenu:"),
             std::mem::transmute::<unsafe extern "C" fn(id, SEL, id), Imp>(on_menu),
             c"v@:@",
+        );
+        // NSUserNotificationCenterDelegate: userNotificationCenter:didActivateNotification:
+        objc.add_method(
+            cls,
+            objc.sel(c"userNotificationCenter:didActivateNotification:"),
+            std::mem::transmute::<unsafe extern "C" fn(id, SEL, id, id), Imp>(on_notify),
+            c"v@:@@",
         );
         objc.register_class(cls);
         cls as usize
@@ -469,6 +516,33 @@ unsafe extern "C" fn delegate_on_menu(this: id, _cmd: SEL, sender: id) {
         }
         let tag = objc.send_ret_i64(sender, objc.sel(c"tag"));
         (*ptr).pending.push(Event::Menu(MenuId(tag as u32)));
+    }));
+}
+
+/// `NSUserNotificationCenterDelegate`: a notification action was clicked. The
+/// action button carries its id in the notification's `identifier`; an
+/// additional action carries it in that action's `identifier`.
+unsafe extern "C" fn delegate_on_notification(this: id, _cmd: SEL, _center: id, notification: id) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        let objc = objc();
+        let ptr = state_from(this);
+        if ptr.is_null() {
+            return;
+        }
+        let kind = objc.send_ret_i64(notification, objc.sel(c"activationType"));
+        let identifier = match kind {
+            ACTIVATION_ACTION_BUTTON => {
+                objc.nsstring_to_rust(objc.send0(notification, objc.sel(c"identifier")))
+            }
+            ACTIVATION_ADDITIONAL_ACTION => {
+                let action = objc.send0(notification, objc.sel(c"additionalActivationAction"));
+                objc.nsstring_to_rust(objc.send0(action, objc.sel(c"identifier")))
+            }
+            _ => None,
+        };
+        if let Some(id) = identifier.and_then(|s| s.parse::<u32>().ok()) {
+            (*ptr).pending.push(Event::NotificationAction(ActionId(id)));
+        }
     }));
 }
 

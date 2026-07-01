@@ -37,9 +37,13 @@ impl Notification {
     /// Builder: add a clickable action button. When the user activates it,
     /// [`crate::Event::NotificationAction`] is delivered with `id`.
     ///
-    /// Actions are currently honored on **Linux** (the freedesktop
-    /// notification spec). On Windows and macOS the notification is still shown,
-    /// but action buttons are ignored — match [`crate::Event`] non-exhaustively.
+    /// Platform behavior:
+    /// - **Linux**: full support — every action is a button (freedesktop spec).
+    /// - **macOS**: the first action is the notification's action button; any
+    ///   further actions become "additional actions" (shown on alert-style
+    ///   notifications). Requires the deprecated `NSUserNotification` path.
+    /// - **Windows**: the classic `Shell_NotifyIcon` balloon has no buttons, so
+    ///   clicking the balloon delivers the **first** action.
     pub fn action(mut self, id: u32, label: impl Into<String>) -> Notification {
         self.actions.push((ActionId(id), label.into()));
         self

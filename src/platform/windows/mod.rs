@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::event::Event;
 use crate::icon::Icon;
 use crate::menu::{Menu, MenuId, MenuItem};
-use crate::notification::Notification;
+use crate::notification::{ActionId, Notification};
 
 /// Message id (in the `WM_APP` range) the shell uses for icon callbacks.
 const CALLBACK_MSG: u32 = WM_APP + 1;
@@ -47,6 +47,9 @@ struct State {
     icon: (i32, i32, Vec<u8>),
     tooltip: String,
     menu: Option<Menu>,
+    /// First action id of the most recent notification with actions; delivered
+    /// when the user clicks the balloon (legacy balloons have no per-button UI).
+    notify_action: Option<u32>,
     pending: Vec<Event>,
     started: bool,
 }
@@ -76,6 +79,7 @@ impl WindowsBackend {
             icon,
             tooltip: init.tooltip,
             menu: init.menu,
+            notify_action: None,
             pending: Vec::new(),
             started: false,
         });
@@ -172,6 +176,12 @@ impl State {
             WM_RBUTTONUP | WM_CONTEXTMENU => {
                 self.pending.push(Event::RightClick);
                 unsafe { self.show_menu() };
+            }
+            NIN_BALLOONUSERCLICK => {
+                if let Some(action) = self.notify_action {
+                    self.pending
+                        .push(Event::NotificationAction(ActionId(action)));
+                }
             }
             _ => {}
         }
@@ -288,6 +298,9 @@ impl Backend for WindowsBackend {
 
     fn notify(&mut self, notification: &Notification) -> Result<()> {
         self.ensure_started()?;
+        // Legacy balloons show no buttons; remember the first action so a click
+        // on the balloon can deliver it.
+        self.state.notify_action = notification.actions.first().map(|(id, _)| id.0);
         unsafe { self.state.show_notification(notification) };
         Ok(())
     }

@@ -169,6 +169,9 @@ pub const NOTIFYICON_VERSION_4: u32 = 4;
 pub const NIIF_INFO: u32 = 0x00000001;
 pub const NIIF_USER: u32 = 0x00000004;
 
+/// Sent (via the icon callback message) when the user clicks the balloon body.
+pub const NIN_BALLOONUSERCLICK: u32 = 0x0405; // WM_USER + 5
+
 pub const BI_RGB: u32 = 0;
 pub const DIB_RGB_COLORS: u32 = 0;
 
